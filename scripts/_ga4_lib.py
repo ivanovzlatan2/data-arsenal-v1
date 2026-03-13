@@ -135,6 +135,56 @@ def list_properties(creds):
     return properties
 
 
+def resolve_property(creds, identifier):
+    """Resolve a property ID or name to a property ID.
+
+    Accepts:
+      - Numeric ID (e.g., '407792414') - returned as-is
+      - Name search (e.g., 'investclub') - fuzzy matches against property names
+      - 'list' - prints all properties and exits
+
+    Returns property_id string or exits with error.
+    """
+    # Pure numeric = already an ID
+    if identifier.isdigit():
+        return identifier
+
+    # List all properties
+    properties = list_properties(creds)
+
+    if identifier.lower() == 'list':
+        if not properties:
+            print("No GA4 properties found.")
+            sys.exit(1)
+        print(f"\n{'Property ID':<15} {'Account':<30} {'Property Name'}")
+        print(f"{'-'*15} {'-'*30} {'-'*30}")
+        for p in properties:
+            print(f"{p['property_id']:<15} {p['account_name'][:30]:<30} {p['display_name'][:30]}")
+        sys.exit(0)
+
+    # Search by name (case-insensitive)
+    search = identifier.lower()
+    matches = [p for p in properties
+               if search in p['display_name'].lower()
+               or search in p['account_name'].lower()]
+
+    if not matches:
+        print(f"No property matching '{identifier}'. Use 'list' to see all properties.", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matches) == 1:
+        p = matches[0]
+        print(f"Matched: {p['display_name']} ({p['property_id']})", file=sys.stderr)
+        return p['property_id']
+
+    # Multiple matches - show them
+    print(f"\nMultiple properties match '{identifier}':\n", file=sys.stderr)
+    for i, p in enumerate(matches, 1):
+        print(f"  {i}. {p['property_id']}  {p['display_name']} ({p['account_name']})", file=sys.stderr)
+    print(f"\nUse the property ID directly, or refine your search.", file=sys.stderr)
+    sys.exit(1)
+
+
 # --- Query Helpers ---
 
 def build_query(date_ranges, metrics, dimensions=None, limit=10000,

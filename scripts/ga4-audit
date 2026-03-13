@@ -14,7 +14,7 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from _ga4_lib import (
     require_credentials, get_data_service, get_property_name,
-    build_query, run_report, parse_rows
+    build_query, run_report, parse_rows, resolve_property
 )
 
 
@@ -343,17 +343,18 @@ def format_markdown(property_name, results, score):
 
 def main():
     parser = argparse.ArgumentParser(description='GA4 Health Check (10 built-in checks)')
-    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('property', help='GA4 property ID or name (use "list" to see all)')
     parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
     args = parser.parse_args()
 
     creds = require_credentials()
+    property_id = resolve_property(creds, args.property)
     service = get_data_service(creds)
-    property_name = get_property_name(creds, args.property_id)
+    property_name = get_property_name(creds, property_id)
 
     print(f"Running health checks for {property_name}...\n", file=sys.stderr)
 
-    data = fetch_audit_data(service, args.property_id)
+    data = fetch_audit_data(service, property_id)
     results = run_all_checks(data)
     score = calculate_score(results)
 

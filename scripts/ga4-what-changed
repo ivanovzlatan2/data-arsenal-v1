@@ -16,7 +16,7 @@ sys.path.insert(0, SCRIPT_DIR)
 from _ga4_lib import (
     require_credentials, get_data_service, get_property_name,
     build_query, run_report, parse_rows, get_date_ranges,
-    calculate_impact, format_change, format_number, MAX_ROWS
+    calculate_impact, format_change, format_number, resolve_property, MAX_ROWS
 )
 
 
@@ -211,15 +211,16 @@ def format_json_output(property_name, reports):
 
 def main():
     parser = argparse.ArgumentParser(description='GA4 What-Changed Reports')
-    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('property', help='GA4 property ID or name (use "list" to see all)')
     parser.add_argument('--days', type=int, default=7, help='Comparison period (default: 7)')
     parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
     args = parser.parse_args()
 
     creds = require_credentials()
+    property_id = resolve_property(creds, args.property)
     service = get_data_service(creds)
-    property_name = get_property_name(creds, args.property_id)
-    is_ecommerce = detect_ecommerce(service, args.property_id)
+    property_name = get_property_name(creds, property_id)
+    is_ecommerce = detect_ecommerce(service, property_id)
 
     if is_ecommerce:
         print(f"E-commerce detected for {property_name}", file=sys.stderr)
@@ -230,12 +231,12 @@ def main():
 
     # Report 1: Overview
     print("Running: Overview...", file=sys.stderr)
-    reports.append(run_overview(service, args.property_id, args.days))
+    reports.append(run_overview(service, property_id, args.days))
 
     # Report 2: Channels
     print("Running: Channels...", file=sys.stderr)
     reports.append(run_dimension_report(
-        service, args.property_id, args.days,
+        service, property_id, args.days,
         title='Channels (by impact)',
         dimension='sessionDefaultChannelGroup',
         metrics=['sessions', 'conversions', 'totalRevenue', 'engagementRate'],
@@ -246,7 +247,7 @@ def main():
     # Report 3: Sources
     print("Running: Sources...", file=sys.stderr)
     reports.append(run_dimension_report(
-        service, args.property_id, args.days,
+        service, property_id, args.days,
         title='Sources (by impact)',
         dimension='sessionSourceMedium',
         metrics=['sessions', 'ecommercePurchases', 'totalRevenue'],
@@ -257,7 +258,7 @@ def main():
     # Report 4: Landing Pages
     print("Running: Landing Pages...", file=sys.stderr)
     reports.append(run_dimension_report(
-        service, args.property_id, args.days,
+        service, property_id, args.days,
         title='Landing Pages (by impact)',
         dimension='landingPage',
         metrics=['activeUsers', 'conversions', 'bounceRate'],
@@ -269,7 +270,7 @@ def main():
     if is_ecommerce:
         print("Running: Products...", file=sys.stderr)
         reports.append(run_dimension_report(
-            service, args.property_id, args.days,
+            service, property_id, args.days,
             title='Products (by impact)',
             dimension='itemName',
             metrics=['totalPurchasers', 'itemRevenue'],
@@ -282,7 +283,7 @@ def main():
     # Report 6: Devices
     print("Running: Devices...", file=sys.stderr)
     reports.append(run_dimension_report(
-        service, args.property_id, args.days,
+        service, property_id, args.days,
         title='Devices (by impact)',
         dimension='deviceCategory',
         metrics=['sessions', 'conversions', 'totalRevenue'],

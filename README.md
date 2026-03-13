@@ -25,8 +25,15 @@ This opens your browser for Google sign-in. Grant read-only access to Google Ana
 ### 3. Analyze
 
 ```
-/ga4-audit 123456789         # Health check (10 checks, 30 seconds)
-/ga4-brief 123456789         # What-changed analysis (AI-powered insights)
+/ga4-audit my-store          # Health check by property name
+/ga4-audit 123456789         # Or by property ID
+/ga4-brief my-store          # What-changed analysis (AI-powered insights)
+```
+
+You can use the **property name** (or part of it) instead of the numeric ID. Use `list` to see all properties:
+
+```
+python3 ~/.config/data-arsenal/scripts/ga4-audit list
 ```
 
 ## Commands
@@ -34,17 +41,19 @@ This opens your browser for Google sign-in. Grant read-only access to Google Ana
 | Command | What it does |
 |---------|-------------|
 | `/ga4-setup` | One-time setup: install deps, authenticate, verify access |
-| `/ga4-audit <property_id>` | 10 built-in health checks with health score |
-| `/ga4-brief <property_id>` | What-changed analysis with business context |
+| `/ga4-audit <property>` | 10 built-in health checks with health score |
+| `/ga4-brief <property>` | What-changed analysis with business context |
 | `/ga4-context <client>` | Create/update business context file (interactive) |
-| `/ga4-report <property_id>` | Custom GA4 report with any metrics/dimensions |
+| `/ga4-report <property>` | Custom GA4 report with any metrics/dimensions |
+
+`<property>` can be a numeric ID (e.g., `123456789`) or a name search (e.g., `my-store`).
 
 ### Options
 
 ```
-/ga4-brief 123456789 --days 14              # Compare last 14 days vs previous 14
-/ga4-brief 123456789 --context my-store     # Use business context file
-/ga4-report 123456789 --metrics sessions,activeUsers --dimensions date --days 30
+/ga4-brief my-store --days 14              # Compare last 14 days vs previous 14
+/ga4-brief my-store --context my-store     # Use business context file
+/ga4-report my-store --metrics sessions,activeUsers --dimensions date --days 30
 ```
 
 ## What You Get
@@ -82,15 +91,19 @@ The Python scripts work independently:
 # Setup
 python3 scripts/ga4-setup
 
-# Health checks
+# List all properties
+python3 scripts/ga4-audit list
+
+# Health checks (by name or ID)
+python3 scripts/ga4-audit my-store
 python3 scripts/ga4-audit 123456789
 
 # What-changed reports
-python3 scripts/ga4-what-changed 123456789
-python3 scripts/ga4-what-changed 123456789 --days 14 --format json
+python3 scripts/ga4-what-changed my-store
+python3 scripts/ga4-what-changed my-store --days 14 --format json
 
 # Custom reports
-python3 scripts/ga4-report 123456789 --metrics sessions,activeUsers --dimensions date --days 30
+python3 scripts/ga4-report my-store --metrics sessions,activeUsers --dimensions date --days 30
 ```
 
 ## Requirements

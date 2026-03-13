@@ -14,14 +14,14 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from _ga4_lib import (
     require_credentials, get_data_service, get_property_name,
-    build_query, run_report, parse_rows, format_number
+    build_query, run_report, parse_rows, format_number, resolve_property
 )
 from datetime import date, timedelta
 
 
 def main():
     parser = argparse.ArgumentParser(description='GA4 Custom Report Runner')
-    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('property', help='GA4 property ID or name (use "list" to see all)')
     parser.add_argument('--metrics', required=True, help='Comma-separated metrics (e.g., sessions,activeUsers)')
     parser.add_argument('--dimensions', help='Comma-separated dimensions (e.g., date,sessionDefaultChannelGroup)')
     parser.add_argument('--days', type=int, default=30, help='Days to look back (default: 30)')
@@ -30,8 +30,9 @@ def main():
     args = parser.parse_args()
 
     creds = require_credentials()
+    property_id = resolve_property(creds, args.property)
     service = get_data_service(creds)
-    property_name = get_property_name(creds, args.property_id)
+    property_name = get_property_name(creds, property_id)
 
     metrics = [m.strip() for m in args.metrics.split(',')]
     dimensions = [d.strip() for d in args.dimensions.split(',')] if args.dimensions else None
@@ -55,7 +56,7 @@ def main():
     )
 
     print(f"Querying {property_name} ({start} to {end})...", file=sys.stderr)
-    resp = run_report(service, args.property_id, body)
+    resp = run_report(service, property_id, body)
     rows = parse_rows(resp, metrics, dimensions=dimensions)
 
     if not rows:
