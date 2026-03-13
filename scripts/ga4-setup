@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+Data Arsenal v1 - Setup Script
+Installs dependencies, runs OAuth, copies scripts, verifies access.
+"""
+
+import os
+import sys
+import subprocess
+import shutil
+
+CONFIG_DIR = os.path.expanduser('~/.config/data-arsenal')
+SCRIPTS_DIR = os.path.join(CONFIG_DIR, 'scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+REQUIRED_PACKAGES = [
+    'google-auth',
+    'google-auth-oauthlib',
+    'google-api-python-client'
+]
+
+
+def check_python():
+    """Verify Python >= 3.8."""
+    if sys.version_info < (3, 8):
+        print(f"Python 3.8+ required, found {sys.version}")
+        sys.exit(1)
+    print(f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+
+
+def install_deps():
+    """Install required Python packages."""
+    print("\nChecking dependencies...")
+    missing = []
+    for pkg in REQUIRED_PACKAGES:
+        try:
+            mod_name = pkg.replace('-', '_').replace('google_api_python_client', 'googleapiclient')
+            __import__(mod_name)
+        except ImportError:
+            missing.append(pkg)
+
+    if missing:
+        print(f"Installing: {', '.join(missing)}")
+        cmd = [sys.executable, '-m', 'pip', 'install', '--user'] + missing
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"pip install failed:\n{result.stderr}")
+            sys.exit(1)
+        print("Dependencies installed.")
+    else:
+        print("All dependencies present.")
+
+
+def run_oauth():
+    """Run OAuth flow and save credentials."""
+    # Ensure we can import after install
+    sys.path.insert(0, SCRIPT_DIR)
+    from _ga4_lib import authenticate, CREDENTIALS_FILE
+
+    if os.path.exists(CREDENTIALS_FILE):
+        print(f"\nExisting credentials found at {CREDENTIALS_FILE}")
+        response = input("Re-authenticate? [y/N]: ").strip().lower()
+        if response != 'y':
+            print("Keeping existing credentials.")
+            return
+
+    print("\nOpening browser for Google sign-in...")
+    print("Grant read-only access to Google Analytics.\n")
+    authenticate()
+    print("Authentication successful.")
+
+
+def copy_scripts():
+    """Copy all scripts to ~/.config/data-arsenal/scripts/."""
+    os.makedirs(SCRIPTS_DIR, exist_ok=True)
+
+    scripts = ['_ga4_lib.py', 'ga4-what-changed', 'ga4-audit', 'ga4-report']
+    copied = 0
+    for script in scripts:
+        src = os.path.join(SCRIPT_DIR, script)
+        dst = os.path.join(SCRIPTS_DIR, script)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            # Preserve executable bit
+            if not script.endswith('.py'):
+                os.chmod(dst, 0o755)
+            copied += 1
+
+    print(f"\nCopied {copied} scripts to {SCRIPTS_DIR}")
+
+
+def verify_access():
+    """Verify API access by listing properties."""
+    sys.path.insert(0, SCRIPT_DIR)
+    from _ga4_lib import load_credentials, list_properties
+
+    print("\nVerifying API access...")
+    creds = load_credentials()
+    if not creds:
+        print("Failed to load credentials.")
+        sys.exit(1)
+
+    try:
+        properties = list_properties(creds)
+    except Exception as e:
+        print(f"API verification failed: {e}")
+        sys.exit(1)
+
+    if not properties:
+        print("No GA4 properties found. Check that your account has Analytics access.")
+        return
+
+    print(f"\nFound {len(properties)} GA4 properties:\n")
+    print(f"{'Property ID':<15} {'Account':<30} {'Property Name'}")
+    print(f"{'-'*15} {'-'*30} {'-'*30}")
+    for p in properties[:20]:
+        print(f"{p['property_id']:<15} {p['account_name'][:30]:<30} {p['display_name'][:30]}")
+    if len(properties) > 20:
+        print(f"  ... and {len(properties) - 20} more")
+
+
+def print_next_steps(properties_exist=True):
+    """Print what to do next."""
+    print("\n" + "=" * 60)
+    print("Setup complete!")
+    print("=" * 60)
+
+    if properties_exist:
+        print("""
+Next steps:
+  /ga4-audit <property_id>     Health check (10 checks)
+  /ga4-brief <property_id>     What-changed analysis
+  /ga4-context <client>        Create business context file
+
+Or run scripts directly:
+  python3 ~/.config/data-arsenal/scripts/ga4-audit <property_id>
+  python3 ~/.config/data-arsenal/scripts/ga4-what-changed <property_id>
+""")
+    else:
+        print("\nNo properties found. Verify your Google account has GA4 access.")
+
+
+def main():
+    print("Data Arsenal v1 - Setup\n")
+
+    check_python()
+    install_deps()
+    run_oauth()
+    copy_scripts()
+    verify_access()
+    print_next_steps()
+
+
+if __name__ == '__main__':
+    main()

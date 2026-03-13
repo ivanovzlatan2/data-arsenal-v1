@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""
+Data Arsenal v1 - What Changed Reports
+6 reports with dual date ranges and impact scoring.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+# Allow importing from same directory or installed location
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+from _ga4_lib import (
+    require_credentials, get_data_service, get_property_name,
+    build_query, run_report, parse_rows, get_date_ranges,
+    calculate_impact, format_change, format_number, MAX_ROWS
+)
+
+
+def detect_ecommerce(service, property_id):
+    """Check if property has e-commerce data."""
+    ranges, *_ = get_date_ranges(30)
+    body = build_query(
+        date_ranges=ranges[:1],  # just current period
+        metrics=['ecommercePurchases'],
+        limit=1
+    )
+    try:
+        resp = run_report(service, property_id, body)
+        rows = parse_rows(resp, ['ecommercePurchases'])
+        return rows and rows[0].get('ecommercePurchases', 0) > 0
+    except Exception:
+        return False
+
+
+def run_overview(service, property_id, days):
+    """Report 1: Overview metrics (no dimension)."""
+    ranges, start, end, prev_start, prev_end = get_date_ranges(days)
+
+    metrics = ['sessions', 'activeUsers', 'engagementRate',
+               'conversions', 'totalRevenue']
+
+    body = build_query(date_ranges=ranges, metrics=metrics, limit=1)
+    resp = run_report(service, property_id, body)
+    rows = parse_rows(resp, metrics, dimensions=['dateRange'])
+
+    current = {}
+    previous = {}
+    for row in rows:
+        dr = row.get('dateRange', '')
+        bucket = current if dr == 'date_range_0' else previous
+        for m in metrics:
+            bucket[m] = row.get(m, 0)
+
+    results = []
+    for m in metrics:
+        cur = current.get(m, 0)
+        prev = previous.get(m, 0)
+        is_rate = m in ('engagementRate', 'bounceRate')
+        change_str, pct = format_change(cur, prev, is_rate=is_rate)
+        results.append({
+            'metric': m,
+            'current': cur,
+            'previous': prev,
+            'change': change_str,
+            'pct': pct
+        })
+
+    return {
+        'title': 'Overview',
+        'period': f"{start} to {end} vs {prev_start} to {prev_end}",
+        'rows': results,
+        'type': 'overview'
+    }
+
+
+def run_dimension_report(service, property_id, days, title, dimension,
+                         metrics, abs_threshold, pct_threshold, is_ecommerce):
+    """Generic dimension report with dual date ranges and impact scoring."""
+    ranges, start, end, prev_start, prev_end = get_date_ranges(days)
+
+    # Filter out ecommerce metrics if not ecommerce
+    if not is_ecommerce:
+        metrics = [m for m in metrics if m not in
+                   ('totalRevenue', 'ecommercePurchases', 'itemRevenue', 'totalPurchasers')]
+        if not metrics:
+            return None
+
+    dims = [dimension, 'dateRange']
+    body = build_query(
+        date_ranges=ranges,
+        metrics=metrics,
+        dimensions=[dimension],
+        limit=500,
+        order_bys=[{'metric': {'metricName': metrics[0]}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    rows = parse_rows(resp, metrics, dimensions=dims)
+
+    # Group by dimension value
+    grouped = {}
+    for row in rows:
+        dim_val = row.get(dimension, '(not set)')
+        dr = row.get('dateRange', '')
+        if dim_val not in grouped:
+            grouped[dim_val] = {'current': {}, 'previous': {}}
+        bucket = 'current' if dr == 'date_range_0' else 'previous'
+        for m in metrics:
+            grouped[dim_val][bucket][m] = row.get(m, 0)
+
+    # Calculate impact for each dimension value + metric combo
+    results = []
+    for dim_val, data in grouped.items():
+        for m in metrics:
+            cur = data['current'].get(m, 0)
+            prev = data['previous'].get(m, 0)
+            abs_diff = abs(float(cur) - float(prev))
+            if float(prev) != 0:
+                pct_diff = abs((float(cur) - float(prev)) / float(prev) * 100)
+            else:
+                pct_diff = 100 if float(cur) >= 5 else 0
+
+            # Filter by thresholds
+            if abs_diff < abs_threshold and pct_diff < pct_threshold:
+                continue
+
+            is_rate = m in ('engagementRate', 'bounceRate')
+            change_str, pct = format_change(cur, prev, is_rate=is_rate)
+            impact = calculate_impact(cur, prev)
+
+            results.append({
+                'dimension': dim_val,
+                'metric': m,
+                'current': cur,
+                'previous': prev,
+                'change': change_str,
+                'pct': pct,
+                'impact': impact
+            })
+
+    # Sort by impact descending
+    results.sort(key=lambda x: x['impact'], reverse=True)
+
+    return {
+        'title': title,
+        'period': f"{start} to {end} vs {prev_start} to {prev_end}",
+        'rows': results[:MAX_ROWS],
+        'type': 'dimension',
+        'total_changes': len(results)
+    }
+
+
+def format_markdown(property_name, reports):
+    """Format all reports as markdown."""
+    lines = [f"## What Changed: {property_name}\n"]
+
+    for report in reports:
+        if report is None:
+            continue
+
+        lines.append(f"### {report['title']}")
+        lines.append(f"Period: {report['period']}\n")
+
+        if report['type'] == 'overview':
+            lines.append("| Metric | Current | Previous | Change | % |")
+            lines.append("|--------|---------|----------|--------|---|")
+            for r in report['rows']:
+                is_rate = r['metric'] in ('engagementRate', 'bounceRate')
+                cur = format_number(r['current'], is_rate)
+                prev = format_number(r['previous'], is_rate)
+                pct_str = f"{r['pct']:+.1f}%"
+                lines.append(f"| {r['metric']} | {cur} | {prev} | {r['change']} | {pct_str} |")
+        else:
+            if not report['rows']:
+                lines.append("No significant changes detected.\n")
+                continue
+
+            lines.append("| Dimension | Metric | Current | Previous | Change | % | Impact |")
+            lines.append("|-----------|--------|---------|----------|--------|---|--------|")
+            for r in report['rows']:
+                is_rate = r['metric'] in ('engagementRate', 'bounceRate')
+                cur = format_number(r['current'], is_rate)
+                prev = format_number(r['previous'], is_rate)
+                pct_str = f"{r['pct']:+.1f}%"
+                impact_str = f"{r['impact']:,.0f}"
+                dim = r['dimension'][:40]
+                lines.append(f"| {dim} | {r['metric']} | {cur} | {prev} | {r['change']} | {pct_str} | {impact_str} |")
+
+            if report.get('total_changes', 0) > MAX_ROWS:
+                lines.append(f"\n*Showing top {MAX_ROWS} of {report['total_changes']} changes.*")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_json_output(property_name, reports):
+    """Format all reports as JSON."""
+    output = {
+        'property': property_name,
+        'reports': []
+    }
+    for report in reports:
+        if report is not None:
+            output['reports'].append(report)
+    return json.dumps(output, indent=2, default=str)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='GA4 What-Changed Reports')
+    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('--days', type=int, default=7, help='Comparison period (default: 7)')
+    parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    args = parser.parse_args()
+
+    creds = require_credentials()
+    service = get_data_service(creds)
+    property_name = get_property_name(creds, args.property_id)
+    is_ecommerce = detect_ecommerce(service, args.property_id)
+
+    if is_ecommerce:
+        print(f"E-commerce detected for {property_name}", file=sys.stderr)
+    else:
+        print(f"Non-ecommerce property: {property_name}", file=sys.stderr)
+
+    reports = []
+
+    # Report 1: Overview
+    print("Running: Overview...", file=sys.stderr)
+    reports.append(run_overview(service, args.property_id, args.days))
+
+    # Report 2: Channels
+    print("Running: Channels...", file=sys.stderr)
+    reports.append(run_dimension_report(
+        service, args.property_id, args.days,
+        title='Channels (by impact)',
+        dimension='sessionDefaultChannelGroup',
+        metrics=['sessions', 'conversions', 'totalRevenue', 'engagementRate'],
+        abs_threshold=20, pct_threshold=10,
+        is_ecommerce=is_ecommerce
+    ))
+
+    # Report 3: Sources
+    print("Running: Sources...", file=sys.stderr)
+    reports.append(run_dimension_report(
+        service, args.property_id, args.days,
+        title='Sources (by impact)',
+        dimension='sessionSourceMedium',
+        metrics=['sessions', 'ecommercePurchases', 'totalRevenue'],
+        abs_threshold=20, pct_threshold=10,
+        is_ecommerce=is_ecommerce
+    ))
+
+    # Report 4: Landing Pages
+    print("Running: Landing Pages...", file=sys.stderr)
+    reports.append(run_dimension_report(
+        service, args.property_id, args.days,
+        title='Landing Pages (by impact)',
+        dimension='landingPage',
+        metrics=['activeUsers', 'conversions', 'bounceRate'],
+        abs_threshold=30, pct_threshold=50,
+        is_ecommerce=is_ecommerce
+    ))
+
+    # Report 5: Products (e-commerce only)
+    if is_ecommerce:
+        print("Running: Products...", file=sys.stderr)
+        reports.append(run_dimension_report(
+            service, args.property_id, args.days,
+            title='Products (by impact)',
+            dimension='itemName',
+            metrics=['totalPurchasers', 'itemRevenue'],
+            abs_threshold=10, pct_threshold=20,
+            is_ecommerce=is_ecommerce
+        ))
+    else:
+        print("Skipping: Products (non-ecommerce)", file=sys.stderr)
+
+    # Report 6: Devices
+    print("Running: Devices...", file=sys.stderr)
+    reports.append(run_dimension_report(
+        service, args.property_id, args.days,
+        title='Devices (by impact)',
+        dimension='deviceCategory',
+        metrics=['sessions', 'conversions', 'totalRevenue'],
+        abs_threshold=20, pct_threshold=30,
+        is_ecommerce=is_ecommerce
+    ))
+
+    # Output
+    if args.format == 'json':
+        print(format_json_output(property_name, reports))
+    else:
+        print(format_markdown(property_name, reports))
+
+
+if __name__ == '__main__':
+    main()

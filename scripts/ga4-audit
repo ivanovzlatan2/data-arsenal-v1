@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""
+Data Arsenal v1 - Built-in Health Checks
+10 checks using GA4 Data API only (analytics.readonly scope).
+"""
+
+import argparse
+import json
+import os
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+from _ga4_lib import (
+    require_credentials, get_data_service, get_property_name,
+    build_query, run_report, parse_rows
+)
+
+
+def fetch_audit_data(service, property_id):
+    """Fetch all data needed for health checks in 4 API calls."""
+    from datetime import date, timedelta
+
+    end = date.today()
+    start = end - timedelta(days=30)
+    date_range = {
+        'startDate': start.strftime('%Y-%m-%d'),
+        'endDate': end.strftime('%Y-%m-%d')
+    }
+
+    data = {}
+
+    # 1. Core metrics (30d)
+    print("  Fetching core metrics...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions', 'activeUsers', 'engagedSessions',
+                 'engagementRate', 'bounceRate', 'conversions', 'totalRevenue'],
+        limit=1
+    )
+    resp = run_report(service, property_id, body)
+    rows = parse_rows(resp, ['sessions', 'activeUsers', 'engagedSessions',
+                              'engagementRate', 'bounceRate', 'conversions', 'totalRevenue'])
+    data['core'] = rows[0] if rows else {}
+
+    # 2. Events list (30d)
+    print("  Fetching events...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['eventCount'],
+        dimensions=['eventName'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'eventCount'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['events'] = parse_rows(resp, ['eventCount'], dimensions=['eventName'])
+
+    # 3. Source/medium report (30d)
+    print("  Fetching sources...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions', 'bounceRate'],
+        dimensions=['sessionSourceMedium'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'sessions'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['sources'] = parse_rows(resp, ['sessions', 'bounceRate'],
+                                  dimensions=['sessionSourceMedium'])
+
+    # 4. Landing pages (30d)
+    print("  Fetching landing pages...", file=sys.stderr)
+    body = build_query(
+        date_ranges=date_range,
+        metrics=['sessions', 'bounceRate'],
+        dimensions=['landingPagePlusQueryString'],
+        limit=500,
+        order_bys=[{'metric': {'metricName': 'sessions'}, 'desc': True}]
+    )
+    resp = run_report(service, property_id, body)
+    data['landing_pages'] = parse_rows(resp, ['sessions', 'bounceRate'],
+                                        dimensions=['landingPagePlusQueryString'])
+
+    return data
+
+
+# --- 10 Health Checks ---
+
+def check_data_volume(data):
+    """Check 1: Data Volume - is there enough traffic?"""
+    sessions = data['core'].get('sessions', 0)
+    if sessions < 100:
+        return 'FAIL', f"Only {sessions:.0f} sessions in 30 days - insufficient data"
+    if sessions < 1000:
+        return 'WARN', f"{sessions:.0f} sessions in 30 days - low volume, analysis limited"
+    return 'PASS', f"{sessions:,.0f} sessions in 30 days"
+
+
+def check_duplicate_tracking(data):
+    """Check 2: Duplicate Tracking - engagement rate suspiciously high?"""
+    rate = data['core'].get('engagementRate', 0)
+    if rate > 0.98:
+        return 'FAIL', f"Engagement rate {rate*100:.1f}% - likely duplicate GA4 tag"
+    if rate > 0.95:
+        return 'WARN', f"Engagement rate {rate*100:.1f}% - unusually high, verify tag setup"
+    return 'PASS', f"Engagement rate {rate*100:.1f}%"
+
+
+def check_enhanced_measurement(data):
+    """Check 3: Enhanced Measurement - are key auto-events present?"""
+    event_names = {e['eventName'] for e in data['events']}
+    expected = ['scroll', 'click', 'file_download', 'video_start', 'view_search_results']
+    present = [e for e in expected if e in event_names]
+    missing = [e for e in expected if e not in event_names]
+
+    if len(present) >= 4:
+        return 'PASS', f"Enhanced measurement active ({len(present)}/5 events found)"
+    if len(present) >= 2:
+        return 'WARN', f"Partial enhanced measurement. Missing: {', '.join(missing)}"
+    return 'WARN', f"Enhanced measurement may be disabled. Missing: {', '.join(missing)}"
+
+
+def check_conversions(data):
+    """Check 4: Conversion Events - are any conversions tracking?"""
+    conversions = data['core'].get('conversions', 0)
+    event_names = {e['eventName'] for e in data['events']}
+
+    conversion_signals = ['purchase', 'generate_lead', 'sign_up', 'submit_form',
+                          'contact', 'begin_checkout', 'add_to_cart']
+    found = [e for e in conversion_signals if e in event_names]
+
+    if conversions > 0:
+        return 'PASS', f"{conversions:,.0f} conversions in 30 days. Conversion events: {', '.join(found) if found else 'custom'}"
+    if found:
+        return 'WARN', f"Conversion events exist ({', '.join(found)}) but 0 conversions recorded - check key event marking"
+    return 'WARN', "No conversions and no standard conversion events found - set up key events"
+
+
+def check_ecommerce(data):
+    """Check 5: E-commerce Completeness - has purchase but missing funnel steps?"""
+    event_names = {e['eventName'] for e in data['events']}
+
+    if 'purchase' not in event_names:
+        return 'SKIP', "No purchase events - not an e-commerce property"
+
+    funnel_events = {
+        'view_item': 'view_item',
+        'add_to_cart': 'add_to_cart',
+        'begin_checkout': 'begin_checkout'
+    }
+    missing = [name for key, name in funnel_events.items() if key not in event_names]
+
+    if not missing:
+        return 'PASS', "Full e-commerce funnel tracked (view_item, add_to_cart, begin_checkout, purchase)"
+    return 'WARN', f"E-commerce funnel incomplete. Has purchase but missing: {', '.join(missing)}"
+
+
+def check_referral_spam(data):
+    """Check 6: Referral Spam - sources with high volume + extreme bounce rate."""
+    spam_patterns = ['semalt', 'buttons-for-website', 'event-tracking',
+                     'free-share-buttons', 'get-free-traffic', 'traffic2money',
+                     'best-seo', 'qualitymarketzone', 'trafficmonetize']
+    suspicious = []
+
+    for source in data['sources']:
+        name = source.get('sessionSourceMedium', '').lower()
+        sessions = source.get('sessions', 0)
+        bounce = source.get('bounceRate', 0)
+
+        if sessions < 50:
+            continue
+
+        # Check known spam patterns
+        is_spam_pattern = any(p in name for p in spam_patterns)
+        # High bounce + referral = suspicious
+        is_suspicious = bounce > 0.95 and 'referral' in name
+
+        if is_spam_pattern or is_suspicious:
+            suspicious.append(f"{source['sessionSourceMedium']} ({sessions:.0f} sessions, {bounce*100:.0f}% bounce)")
+
+    if not suspicious:
+        return 'PASS', "No referral spam detected"
+    return 'WARN', f"Potential spam sources: {'; '.join(suspicious[:3])}"
+
+
+def check_self_referral(data):
+    """Check 7: Self-Referral - primary domain appearing as referral."""
+    # Try to detect domain from landing pages
+    domains = set()
+    for lp in data['landing_pages']:
+        page = lp.get('landingPagePlusQueryString', '')
+        if page.startswith('/'):
+            continue  # Relative path, no domain info in GA4
+        # GA4 landingPagePlusQueryString is usually just the path
+        # This check works best with user-provided domain
+        # For now, skip if we can't detect
+        pass
+
+    # Check referral sources for common self-referral patterns
+    total_sessions = data['core'].get('sessions', 1)
+    self_referrals = []
+
+    for source in data['sources']:
+        name = source.get('sessionSourceMedium', '')
+        sessions = source.get('sessions', 0)
+        pct = (sessions / total_sessions * 100) if total_sessions > 0 else 0
+
+        # Flag if a referral source has unusually high sessions (>5% of total)
+        if '/ referral' in name and pct > 5:
+            self_referrals.append(f"{name} ({pct:.1f}% of sessions)")
+
+    if not self_referrals:
+        return 'PASS', "No obvious self-referral detected"
+    return 'WARN', f"Potential self-referral (verify these are not your own domains): {'; '.join(self_referrals[:3])}"
+
+
+def check_not_set_landing_pages(data):
+    """Check 8: (not set) Landing Pages - tracking issue indicator."""
+    total_sessions = data['core'].get('sessions', 1)
+    not_set_sessions = 0
+
+    for lp in data['landing_pages']:
+        page = lp.get('landingPagePlusQueryString', '')
+        if page in ('(not set)', '(not set)/', ''):
+            not_set_sessions += lp.get('sessions', 0)
+
+    pct = (not_set_sessions / total_sessions * 100) if total_sessions > 0 else 0
+
+    if pct > 20:
+        return 'FAIL', f"{pct:.1f}% of sessions have (not set) landing page - likely tracking issue"
+    if pct > 5:
+        return 'WARN', f"{pct:.1f}% of sessions have (not set) landing page"
+    return 'PASS', f"{pct:.1f}% (not set) landing pages"
+
+
+def check_high_bounce_pages(data):
+    """Check 9: High Bounce Pages - potential broken or mismatched pages."""
+    problem_pages = []
+
+    for lp in data['landing_pages']:
+        page = lp.get('landingPagePlusQueryString', '')
+        sessions = lp.get('sessions', 0)
+        bounce = lp.get('bounceRate', 0)
+
+        if sessions >= 50 and bounce > 0.85 and page != '(not set)':
+            problem_pages.append(f"{page[:60]} ({sessions:.0f} sessions, {bounce*100:.0f}% bounce)")
+
+    if not problem_pages:
+        return 'PASS', "No landing pages with critically high bounce rate"
+    return 'INFO', f"Pages with >85% bounce rate: {'; '.join(problem_pages[:3])}"
+
+
+def check_event_variety(data):
+    """Check 10: Event Variety - under-tracked or over-tracked?"""
+    event_count = len(data['events'])
+
+    if event_count < 5:
+        return 'WARN', f"Only {event_count} unique events - property appears under-tracked"
+    if event_count > 200:
+        return 'WARN', f"{event_count} unique events - possible event spam or over-tracking"
+    return 'PASS', f"{event_count} unique events tracked"
+
+
+def run_all_checks(data):
+    """Run all 10 health checks, return results."""
+    checks = [
+        ('Data Volume', check_data_volume),
+        ('Duplicate Tracking', check_duplicate_tracking),
+        ('Enhanced Measurement', check_enhanced_measurement),
+        ('Conversion Events', check_conversions),
+        ('E-commerce Completeness', check_ecommerce),
+        ('Referral Spam', check_referral_spam),
+        ('Self-Referral', check_self_referral),
+        ('(not set) Landing Pages', check_not_set_landing_pages),
+        ('High Bounce Pages', check_high_bounce_pages),
+        ('Event Variety', check_event_variety),
+    ]
+
+    results = []
+    for name, fn in checks:
+        status, detail = fn(data)
+        results.append({
+            'check': name,
+            'status': status,
+            'detail': detail
+        })
+
+    return results
+
+
+def calculate_score(results):
+    """Calculate health score 0-100."""
+    scored = [r for r in results if r['status'] not in ('SKIP', 'INFO')]
+    if not scored:
+        return 100
+
+    passed = sum(1 for r in scored if r['status'] == 'PASS')
+    return int(passed / len(scored) * 100)
+
+
+def format_markdown(property_name, results, score):
+    """Format results as markdown."""
+    status_icons = {
+        'PASS': 'Pass',
+        'WARN': 'Warning',
+        'FAIL': 'Fail',
+        'SKIP': 'Skipped',
+        'INFO': 'Info'
+    }
+
+    lines = [
+        f"## GA4 Health Check: {property_name}",
+        f"**Health Score: {score}/100**\n",
+        "| # | Check | Status | Details |",
+        "|---|-------|--------|---------|"
+    ]
+
+    for i, r in enumerate(results, 1):
+        status = status_icons.get(r['status'], r['status'])
+        detail = r['detail'].replace('|', '\\|')
+        lines.append(f"| {i} | {r['check']} | {status} | {detail} |")
+
+    # Summary
+    fails = sum(1 for r in results if r['status'] == 'FAIL')
+    warns = sum(1 for r in results if r['status'] == 'WARN')
+
+    lines.append("")
+    if fails > 0:
+        lines.append(f"**{fails} critical issue(s) found.** Fix these before trusting your data.")
+    if warns > 0:
+        lines.append(f"**{warns} warning(s).** Review and address when possible.")
+    if fails == 0 and warns == 0:
+        lines.append("All checks passed. Data quality looks good.")
+
+    lines.append("")
+    lines.append("*These are 10 basic health checks. For a comprehensive 50-check audit")
+    lines.append("including Admin API settings, GTM analysis, and consent mode verification,")
+    lines.append("visit audit.dataarsenal.com*")
+
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='GA4 Health Check (10 built-in checks)')
+    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    args = parser.parse_args()
+
+    creds = require_credentials()
+    service = get_data_service(creds)
+    property_name = get_property_name(creds, args.property_id)
+
+    print(f"Running health checks for {property_name}...\n", file=sys.stderr)
+
+    data = fetch_audit_data(service, args.property_id)
+    results = run_all_checks(data)
+    score = calculate_score(results)
+
+    if args.format == 'json':
+        output = {
+            'property': property_name,
+            'score': score,
+            'checks': results
+        }
+        print(json.dumps(output, indent=2))
+    else:
+        print(format_markdown(property_name, results, score))
+
+
+if __name__ == '__main__':
+    main()

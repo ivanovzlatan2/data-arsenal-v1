@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""
+Data Arsenal v1 - Custom Report Runner
+Simple wrapper for arbitrary GA4 queries.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+
+from _ga4_lib import (
+    require_credentials, get_data_service, get_property_name,
+    build_query, run_report, parse_rows, format_number
+)
+from datetime import date, timedelta
+
+
+def main():
+    parser = argparse.ArgumentParser(description='GA4 Custom Report Runner')
+    parser.add_argument('property_id', help='GA4 property ID')
+    parser.add_argument('--metrics', required=True, help='Comma-separated metrics (e.g., sessions,activeUsers)')
+    parser.add_argument('--dimensions', help='Comma-separated dimensions (e.g., date,sessionDefaultChannelGroup)')
+    parser.add_argument('--days', type=int, default=30, help='Days to look back (default: 30)')
+    parser.add_argument('--limit', type=int, default=100, help='Row limit (default: 100)')
+    parser.add_argument('--format', choices=['markdown', 'json'], default='markdown')
+    args = parser.parse_args()
+
+    creds = require_credentials()
+    service = get_data_service(creds)
+    property_name = get_property_name(creds, args.property_id)
+
+    metrics = [m.strip() for m in args.metrics.split(',')]
+    dimensions = [d.strip() for d in args.dimensions.split(',')] if args.dimensions else None
+
+    end = date.today()
+    start = end - timedelta(days=args.days)
+    date_range = {
+        'startDate': start.strftime('%Y-%m-%d'),
+        'endDate': end.strftime('%Y-%m-%d')
+    }
+
+    # Build and run query
+    order_bys = [{'metric': {'metricName': metrics[0]}, 'desc': True}] if metrics else None
+
+    body = build_query(
+        date_ranges=date_range,
+        metrics=metrics,
+        dimensions=dimensions,
+        limit=args.limit,
+        order_bys=order_bys
+    )
+
+    print(f"Querying {property_name} ({start} to {end})...", file=sys.stderr)
+    resp = run_report(service, args.property_id, body)
+    rows = parse_rows(resp, metrics, dimensions=dimensions)
+
+    if not rows:
+        print("No data returned.")
+        return
+
+    if args.format == 'json':
+        print(json.dumps({
+            'property': property_name,
+            'period': f"{start} to {end}",
+            'rows': rows
+        }, indent=2, default=str))
+    else:
+        # Markdown table
+        cols = (dimensions or []) + metrics
+        print(f"## Report: {property_name}")
+        print(f"Period: {start} to {end}\n")
+        print("| " + " | ".join(cols) + " |")
+        print("| " + " | ".join(["---"] * len(cols)) + " |")
+        for row in rows:
+            vals = []
+            for c in cols:
+                v = row.get(c, '')
+                if isinstance(v, float):
+                    vals.append(format_number(v))
+                else:
+                    vals.append(str(v))
+            print("| " + " | ".join(vals) + " |")
+
+        print(f"\n{len(rows)} rows returned.")
+
+
+if __name__ == '__main__':
+    main()
